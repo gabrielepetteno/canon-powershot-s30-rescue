@@ -1,0 +1,130 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+# Distribution name on PyPI. The *import* package stays `retrocam`.
+name = "retrocam-rescue"
+dynamic = ["version"]            # single source of truth: src/retrocam/__init__.py
+description = "Rescue photos from old digital cameras (Canon PowerShot S30 and friends). 100% local, no cloud."
+readme = "README.md"
+requires-python = ">=3.9"
+# Kept in the classic PEP 621 table form rather than the newer SPDX string
+# (`license = "MIT"`), which emits a PEP 639 `License-Expression` field that
+# pip < 24.2 does not understand. The whole point of the 3.9 floor is running on
+# machines old enough to still have a card reader, and those have old pip.
+license = { file = "LICENSE" }
+authors = [{ name = "RetroCam Rescue contributors" }]
+keywords = [
+  "camera",
+  "canon",
+  "powershot",
+  "gphoto2",
+  "wia",
+  "compactflash",
+  "photo-recovery",
+  "tkinter",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: MacOS X",
+  "Environment :: Win32 (MS Windows)",
+  "Environment :: X11 Applications",
+  "Intended Audience :: End Users/Desktop",
+  "License :: OSI Approved :: MIT License",
+  "Natural Language :: English",
+  "Natural Language :: Italian",
+  "Operating System :: MacOS :: MacOS X",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Topic :: Multimedia :: Graphics :: Capture :: Digital Camera",
+  "Topic :: System :: Archiving :: Backup",
+  "Topic :: Utilities",
+]
+
+# Deliberately empty. The application must fully start, detect a card, download
+# and verify with nothing but the standard library — a rescue tool that cannot
+# run until pip works is a rescue tool that does not run.
+dependencies = []
+
+[project.optional-dependencies]
+# Deeper verification: decodes the JPEG instead of only checking its markers.
+# Without it, verify.py still runs the structural checks and reports
+# checked_decode=False so the UI can say how strong the guarantee is.
+image = ["Pillow>=9.5"]
+
+# The WIA backend's only dependency. The environment marker keeps
+# `pip install .[windows]` a harmless no-op on macOS and Linux, so one CI
+# command works on every platform.
+windows = ["pywin32>=306; sys_platform == 'win32'"]
+
+# Convenience alias: everything optional that can be installed here.
+all = ["Pillow>=9.5", "pywin32>=306; sys_platform == 'win32'"]
+
+# Both names point at the same argument parser (retrocam.__main__:main), which
+# handles --version and --cli before it imports tkinter. Only the launcher stub
+# differs: on Windows a gui-script is bound to pythonw.exe, so double-clicking
+# it does not flash a console window behind the Tk window, while a console
+# script keeps a terminal attached. On macOS and Linux the two are identical.
+[project.gui-scripts]
+retrocam = "retrocam.__main__:main"
+
+# Use this one when you want to see the output: `retrocam-cli --cli` prints a
+# read-only detect-and-list, which is what to paste into a bug report.
+[project.scripts]
+retrocam-cli = "retrocam.__main__:main"
+
+# The repository is named after the camera, not after the app: people arrive
+# here by searching "Canon PowerShot S30 download photos", not by searching for
+# a project they have never heard of. Only the repo name changed — the import
+# package is still `retrocam` and the distribution is still `retrocam-rescue`.
+# "Downloads" is listed first and points straight at the release binaries,
+# because for a non-technical user that page IS the installation instructions.
+[project.urls]
+Downloads = "https://github.com/gabrielepetteno/canon-powershot-s30-rescue/releases/latest"
+Homepage = "https://github.com/gabrielepetteno/canon-powershot-s30-rescue"
+Source = "https://github.com/gabrielepetteno/canon-powershot-s30-rescue"
+Issues = "https://github.com/gabrielepetteno/canon-powershot-s30-rescue/issues"
+Changelog = "https://github.com/gabrielepetteno/canon-powershot-s30-rescue/releases"
+
+# PEP 735 groups: development-only, never shipped inside the wheel.
+[dependency-groups]
+dev = ["pytest>=8.0"]
+# Pinned below 7: PyInstaller 7 turns `--onefile --windowed` on macOS from a
+# deprecation warning into a hard error, and the spec file relies on the 6.x
+# behaviour for the Windows onefile build.
+build = ["pyinstaller>=6.22,<7"]
+
+[tool.hatch.version]
+path = "src/retrocam/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/retrocam"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "src/",
+  "tests/",
+  "packaging/",
+  "run.sh",
+  "run.bat",
+  "RetroCam Rescue.command",
+  "README.md",
+  "README.it.md",
+  "GUIDA-RAPIDA.md",
+  "CONTRIBUTING.md",
+  "LICENSE",
+]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = "-q"

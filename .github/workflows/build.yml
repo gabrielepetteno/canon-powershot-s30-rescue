@@ -1,0 +1,296 @@
+name: build
+
+# Binaries are produced on tag pushes only; workflow_dispatch exists so a
+# packaging change can be proven before it is tagged.
+#
+# The download page IS the documentation for this project: a non-technical user
+# is told "go to Releases, take the file for your computer, double-click it".
+# Everything below exists to make sure that sentence stays true — that all three
+# files are always present, correctly named, and actually runnable on the
+# machine their name promises.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # One build interpreter for every job. Not 3.9: that is the floor for *running*
+  # the app, and release binaries should be frozen from a current CPython.
+  UV_PYTHON: "3.12"
+
+jobs:
+  # Cheap gate. Never publish a tag whose tests fail, and prove the 3.9 floor
+  # still holds while we are at it — the floor exists for old machines, and an
+  # untested floor is a claim rather than a fact.
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+
+      # Tkinter is not importable on the runner without this, and several
+      # modules import it at collection time.
+      - name: Install Tk
+        run: sudo apt-get update && sudo apt-get install -y python3-tk
+
+      - name: Run tests
+        run: uv run --python ${{ matrix.python }} --group dev python -m pytest -q
+
+  build:
+    needs: test
+    strategy:
+      # fail-fast: false so one broken platform still produces the others'
+      # logs. It does NOT let a partial release through: `release` needs
+      # `build` to succeed, and re-checks that all three files arrived.
+      fail-fast: false
+      matrix:
+        include:
+          # `asset` is the literal filename a human downloads. It is the only
+          # naming authority in this file — no version number, no triple, no
+          # architecture jargon beyond the two words a Mac owner can check in
+          # "About This Mac". Names stay stable across releases so a support
+          # answer written today ("download RetroCam-Rescue-Windows.exe") is
+          # still correct next year.
+          - os: macos-26
+            asset: RetroCam-Rescue-macOS-AppleSilicon
+            expect_arch: arm64
+          - os: macos-26-intel
+            asset: RetroCam-Rescue-macOS-Intel
+            expect_arch: x86_64
+          - os: windows-latest
+            asset: RetroCam-Rescue-Windows
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        # bash exists on the Windows runners too, so one script covers all three.
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      # uv rather than actions/setup-python on purpose: setup-python's macOS
+      # builds have a long history of broken tkinter ("libtk8.6.dylib not
+      # found"), while uv-managed python-build-standalone ships a working,
+      # dynamically linked Tcl/Tk.
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+
+      # --no-editable installs a real wheel into the venv, so PyInstaller's
+      # module graph does not have to follow an editable-install .pth shim.
+      - name: Install project and build tools
+        run: uv sync --no-editable --group build --extra image --extra windows
+
+      - name: Sanity check — tkinter must be importable in the build env
+        run: uv run python -c "import tkinter, sys; print('Tk', tkinter.TkVersion, sys.version)"
+
+      - name: Build
+        run: uv run pyinstaller packaging/retrocam.spec --noconfirm --clean
+
+      # The runners are headless, so this only passes if --version is handled
+      # before any Tk root is created.
+      - name: Smoke-test the artifact
+        run: |
+          set -euo pipefail
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            # A --windowed build has no stdout on Windows (sys.stdout is None,
+            # and print() is then a silent no-op), so the exit code is the only
+            # signal available. It is still a real signal: a frozen build with a
+            # missing module exits non-zero here.
+            "dist/RetroCam Rescue.exe" --version
+            echo "exit code 0 — the frozen binary starts and parses arguments"
+          else
+            OUT=$("dist/RetroCam Rescue.app/Contents/MacOS/RetroCam Rescue" --version)
+            echo "$OUT"
+            # Assert the text, not just the exit code: a build that lost its
+            # own package would still be capable of exiting 0.
+            case "$OUT" in
+              *"RetroCam Rescue"*) ;;
+              *) echo "unexpected --version output"; exit 1 ;;
+            esac
+          fi
+
+      # The single most dangerous failure this workflow can have is shipping a
+      # file whose NAME says Intel and whose CONTENTS are arm64 (or the reverse).
+      # An Intel Mac would answer with "You can't open the application because
+      # it is not supported on this Mac", which reads to a non-technical user as
+      # "this program is broken". So the architecture is not assumed from the
+      # runner label — it is read back out of the built binary and must match.
+      - name: Verify the built binary really is ${{ matrix.expect_arch }}
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          BIN="dist/RetroCam Rescue.app/Contents/MacOS/RetroCam Rescue"
+          ACTUAL=$(lipo -archs "$BIN")
+          echo "expected: ${{ matrix.expect_arch }}"
+          echo "actual:   $ACTUAL"
+          if [ "$ACTUAL" != "${{ matrix.expect_arch }}" ]; then
+            echo "ARCHITECTURE MISMATCH — refusing to publish a mislabelled artifact."
+            exit 1
+          fi
+          # Informational, recorded in the log so the minimum-macOS claim in
+          # packaging/build.md can be checked against the real binary rather
+          # than against what we believe the toolchain does.
+          vtool -show-build "$BIN" 2>/dev/null | grep -i -E "minos|platform" || true
+          /usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" \
+            "dist/RetroCam Rescue.app/Contents/Info.plist" || true
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          # ditto, not zip: the bundle holds symlinks and a _CodeSignature seal,
+          # and zip -r produces an archive that macOS calls "damaged".
+          ditto -c -k --sequesterRsrc --keepParent \
+            "dist/RetroCam Rescue.app" "${{ matrix.asset }}.zip"
+          # Informational: records in the log that the bundle is ad-hoc signed
+          # and not notarized, which is what the release notes tell users.
+          codesign -dv --verbose=2 "dist/RetroCam Rescue.app" || true
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          set -euo pipefail
+          # Shipped as a bare .exe, deliberately not zipped: "download, then
+          # double-click" is one step, while a zip adds "right-click, Extract
+          # All, find the file" — and double-clicking an .exe from inside the
+          # Explorer zip viewer runs it from a temp folder, which is a classic
+          # confusing failure. The name still says Windows at a glance.
+          mv "dist/RetroCam Rescue.exe" "${{ matrix.asset }}.exe"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: binary-${{ matrix.asset }}
+          path: |
+            RetroCam-Rescue-*.zip
+            RetroCam-Rescue-*.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      # Only this job may write to the repository, and only to create a release.
+      contents: write
+      # download-artifact reads the run's artifacts through the Actions API.
+      actions: read
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      # A release missing one of its three files is worse than no release: the
+      # documentation tells people to "take the file for your computer", and a
+      # Mac owner who finds only a Windows .exe concludes the project is broken.
+      - name: All three downloads must be present
+        run: |
+          set -euo pipefail
+          cd dist
+          MISSING=0
+          for f in RetroCam-Rescue-Windows.exe \
+                   RetroCam-Rescue-macOS-AppleSilicon.zip \
+                   RetroCam-Rescue-macOS-Intel.zip; do
+            if [ -s "$f" ]; then
+              echo "ok      $f"
+            else
+              echo "MISSING $f"
+              MISSING=1
+            fi
+          done
+          ls -lh
+          exit $MISSING
+
+      - name: Checksums
+        run: cd dist && sha256sum * | tee SHA256SUMS.txt
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
+          # Refuse to publish a half-empty release rather than publish it quietly.
+          fail_on_unmatched_files: true
+          # No auto-generated changelog. This page is read by someone trying to
+          # rescue photographs, not by someone reviewing commits; a wall of
+          # "Merge pull request #12" under the download buttons buries the one
+          # instruction that matters. The commit history is one click away under
+          # the tag.
+          generate_release_notes: false
+          draft: false
+          make_latest: true
+          body: |
+            **Download the one file that matches your computer, then double-click it.**
+            That is the whole installation — there is nothing else to install and nothing to set up.
+
+            | Your computer | Download this file |
+            | --- | --- |
+            | Windows PC | `RetroCam-Rescue-Windows.exe` |
+            | Mac with an Apple chip (M1, M2, M3, M4) | `RetroCam-Rescue-macOS-AppleSilicon.zip` |
+            | Mac with an Intel chip | `RetroCam-Rescue-macOS-Intel.zip` |
+
+            **Not sure which Mac you have?** Click the Apple menu in the top-left corner of
+            the screen, then **About This Mac**. If the word **Apple** appears next to *Chip*
+            (for example "Apple M2"), take the Apple Silicon file. If it says **Intel**, take
+            the Intel file. Taking the wrong one is not dangerous — the Mac will simply say it
+            cannot open it, and you can come back and take the other.
+
+            ---
+
+            ### Your computer will warn you the first time. This is normal, and here is why.
+
+            The app is not signed with a paid certificate (Apple charges $99 a year, Microsoft
+            about the same). Windows and macOS therefore say they cannot identify who made it.
+            The warning is about the missing certificate, not about anything found in the file.
+
+            **On Windows** — a blue box says *"Windows protected your PC"*.
+            Click **More info**, then click **Run anyway**.
+
+            **On a Mac** — a box says *"Apple could not verify that this app is free of malware"*.
+            1. Click **Done**.
+            2. Open **System Settings** → **Privacy & Security**.
+            3. Scroll down to **Security**. A line there names RetroCam Rescue. Click **Open Anyway**.
+            4. Confirm with your fingerprint or password, then open the app again.
+
+            You only do this once. (Right-click → Open, which older guides on the internet
+            recommend, stopped working in macOS 15.)
+
+            `SHA256SUMS.txt` is for people who want to check that the file they downloaded is
+            byte-for-byte the file this page built. It is entirely optional.
+
+            ---
+
+            ### What is tested, and what is not
+
+            We would rather lose a download than lose someone's photographs, so:
+
+            - **A memory card in a card reader works everywhere, needs nothing extra, and is
+              the most reliable route.** If your camera's card fits a reader you already own,
+              use that and ignore everything below.
+            - **Connecting the camera itself by USB cable on a Mac** needs one extra free
+              program called gphoto2, because cameras this old speak a language macOS does not
+              understand on its own. The app detects this, says so in plain words, and gives
+              you the exact line to copy. This route is fully tested — with a real Canon
+              PowerShot S30, on a Mac with an Apple chip.
+            - **The Intel Mac build** is built and started automatically on a real Intel Mac,
+              but no one has yet rescued photos with it on one. We expect it to work. We have
+              not watched it work.
+            - **Connecting a camera by USB cable on Windows has never been tested on a real
+              Windows PC.** The code exists, it passes its tests against a simulated Windows,
+              and the app labels that option "never tested on real hardware" in its own window.
+              On Windows, use a card reader.
+
+            The app never deletes anything from your camera unless you ask it to, and it checks
+            every photo arrived intact before it will even offer.
+
+            Everything runs on your own computer. Nothing is uploaded anywhere. There is no
+            account, no cloud, and no internet connection required.
