@@ -34,7 +34,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.0.0
         with:
           enable-cache: true
 
@@ -81,7 +81,7 @@ jobs:
       # builds have a long history of broken tkinter ("libtk8.6.dylib not
       # found"), while uv-managed python-build-standalone ships a working,
       # dynamically linked Tcl/Tk.
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.0.0
         with:
           enable-cache: true
 
